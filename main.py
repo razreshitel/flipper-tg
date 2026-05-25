@@ -5,15 +5,14 @@ from pathlib import Path
 
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
 
 from database import (
     init_db, get_chats, get_messages, get_chat, get_message_count,
-    delete_message, save_sent_message, ensure_chat,
+    delete_message, save_sent_message,
 )
 from bot import setup_bot_with_handlers
 
@@ -22,6 +21,7 @@ load_dotenv()
 BASE_DIR = Path(__file__).parent
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8888"))
+FLIPPER_SECRET = os.getenv("FLIPPER_SECRET", "")
 
 app = FastAPI(title="Flipper Telegram")
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
@@ -43,6 +43,13 @@ def fmtdate(s: str) -> str:
 
 templates.env.filters["coloridx"] = coloridx
 templates.env.filters["fmtdate"] = fmtdate
+
+
+# ── Flipper secret auth ───────────────────────────────────────────────────────
+
+async def require_secret(request: Request):
+    if FLIPPER_SECRET and request.headers.get("X-Secret") != FLIPPER_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 # ── Web UI ────────────────────────────────────────────────────────────────────
@@ -95,29 +102,6 @@ async def api_delete_message(message_id: int):
     return {"ok": True}
 
 
-class NewChatBody(BaseModel):
-    username: str
-
-
-@app.post("/api/chats/new")
-async def api_new_chat(body: NewChatBody):
-    if _bot_app is None:
-        raise HTTPException(status_code=503, detail="Bot not ready")
-    username = body.username.lstrip("@")
-    try:
-        tg_chat = await _bot_app.bot.get_chat(f"@{username}")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    name = (tg_chat.title or tg_chat.full_name or tg_chat.username or str(tg_chat.id))
-    await ensure_chat(
-        chat_id=tg_chat.id,
-        name=name,
-        username=tg_chat.username,
-        chat_type=tg_chat.type,
-    )
-    return {"id": tg_chat.id, "name": name, "username": tg_chat.username}
-
-
 # ── Flipper API ───────────────────────────────────────────────────────────────
 
 _CYR_MAP = {
@@ -136,21 +120,28 @@ _CYR_MAP = {
 
 def _asc(s: str, maxlen: int) -> str:
     out = []
+    prev_bracket = False
     for ch in (s or ""):
-        if 32 <= ord(ch) < 127:
+        cp = ord(ch)
+        if 32 <= cp < 127:
             out.append(ch)
+            prev_bracket = False
         elif ch in _CYR_MAP:
             out.append(_CYR_MAP[ch])
+            prev_bracket = False
+        elif cp > 127 and not prev_bracket:
+            out.append("[]")
+            prev_bracket = True
     clean = "".join(out).strip()
     return (clean or "?")[:maxlen]
 
 
-@app.get("/flipper/ping")
+@app.get("/flipper/ping", dependencies=[Depends(require_secret)])
 async def flipper_ping():
     return {"ok": 1}
 
 
-@app.get("/flipper/chats")
+@app.get("/flipper/chats", dependencies=[Depends(require_secret)])
 async def flipper_chats():
     chats = await get_chats(limit=20)
     return {
@@ -161,7 +152,7 @@ async def flipper_chats():
     }
 
 
-@app.get("/flipper/messages/{chat_id}")
+@app.get("/flipper/messages/{chat_id}", dependencies=[Depends(require_secret)])
 async def flipper_messages(chat_id: int, page: int = 0):
     per_page = 5
     count = await get_message_count(chat_id)
@@ -185,7 +176,7 @@ async def flipper_messages(chat_id: int, page: int = 0):
 _bot_app = None
 
 
-@app.post("/flipper/send/{chat_id}")
+@app.post("/flipper/send/{chat_id}", dependencies=[Depends(require_secret)])
 async def flipper_send(chat_id: int, request: Request):
     body = await request.json()
     text = (body.get("text") or "").strip()

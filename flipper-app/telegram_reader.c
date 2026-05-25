@@ -7,14 +7,16 @@
 #include <gui/gui.h>
 #include <gui/view_dispatcher.h>
 #include <gui/modules/text_input.h>
+#include <storage/storage.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
 
-#define TAG       "TgReader"
-#define API_BASE  "https://YOUR_SERVER_IP:8888"
-#define POST_HDRS "{\"Content-Type\":\"application/json\"}"
+#define TAG        "TgReader"
+#define API_BASE   "https://YOUR_SERVER_IP:8888"
+#define CREDS_PATH "/ext/apps_data/telegram_reader/creds.txt"
 #define COMPOSE_SZ 65
+#define CRED_SZ    64
 
 #define SW 128
 #define SH  64
@@ -99,7 +101,72 @@ typedef struct {
     char compose_buf[COMPOSE_SZ];
     char send_payload[90];
     int  msg_char_off;
+
+    char creds_ssid[CRED_SZ];
+    char creds_pass[CRED_SZ];
+    char creds_secret[CRED_SZ];
+    char get_headers[160];
+    char post_headers[220];
+    bool in_setup;
 } TgApp;
+
+// ─── Credentials file ────────────────────────────────────────────────────────
+
+static void creds_build_headers(TgApp* app) {
+    snprintf(app->get_headers, sizeof(app->get_headers),
+             "{\"X-Secret\":\"%s\"}", app->creds_secret);
+    snprintf(app->post_headers, sizeof(app->post_headers),
+             "{\"Content-Type\":\"application/json\",\"X-Secret\":\"%s\"}", app->creds_secret);
+}
+
+static bool creds_load(TgApp* app) {
+    Storage* st = furi_record_open(RECORD_STORAGE);
+    File*    f  = storage_file_alloc(st);
+    bool     ok = false;
+
+    if(storage_file_open(f, CREDS_PATH, FSAM_READ, FSOM_OPEN_EXISTING)) {
+        char buf[220] = {0};
+        storage_file_read(f, buf, sizeof(buf) - 1);
+        storage_file_close(f);
+
+        char* p;
+        char* nl;
+        #define PARSE_FIELD(key, dst) \
+            p = strstr(buf, key "="); \
+            if(p) { \
+                snprintf(dst, sizeof(dst), "%.63s", p + strlen(key) + 1); \
+                nl = strchr(dst, '\n'); if(nl) *nl = '\0'; \
+                nl = strchr(dst, '\r'); if(nl) *nl = '\0'; \
+            }
+        PARSE_FIELD("ssid",   app->creds_ssid)
+        PARSE_FIELD("pass",   app->creds_pass)
+        PARSE_FIELD("secret", app->creds_secret)
+        #undef PARSE_FIELD
+
+        ok = app->creds_ssid[0] && app->creds_pass[0] && app->creds_secret[0];
+    }
+
+    storage_file_free(f);
+    furi_record_close(RECORD_STORAGE);
+    return ok;
+}
+
+static void creds_save(TgApp* app) {
+    Storage* st = furi_record_open(RECORD_STORAGE);
+    storage_common_mkdir(st, "/ext/apps_data/telegram_reader");
+    File* f = storage_file_alloc(st);
+
+    if(storage_file_open(f, CREDS_PATH, FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
+        char buf[220];
+        int  len = snprintf(buf, sizeof(buf), "ssid=%s\npass=%s\nsecret=%s\n",
+                            app->creds_ssid, app->creds_pass, app->creds_secret);
+        storage_file_write(f, buf, (uint16_t)len);
+        storage_file_close(f);
+    }
+
+    storage_file_free(f);
+    furi_record_close(RECORD_STORAGE);
+}
 
 // ─── JSON helpers ─────────────────────────────────────────────────────────────
 
@@ -451,7 +518,7 @@ static bool do_http_get(TgApp* app) {
     furi_mutex_release(app->mx);
     view_dispatcher_send_custom_event(app->vd, CUSTOM_EV_REDRAW);
 
-    bool sent = flipper_http_request(app->fhttp, GET, url, NULL, NULL);
+    bool sent = flipper_http_request(app->fhttp, GET, url, app->get_headers, NULL);
     FURI_LOG_I(TAG, "HTTP GET %s → sent=%d", url, (int)sent);
 
     furi_mutex_acquire(app->mx, FuriWaitForever);
@@ -531,7 +598,7 @@ static bool do_http_post(TgApp* app) {
     snprintf(payload, sizeof(payload), "%s", app->send_payload);
     furi_mutex_release(app->mx);
 
-    bool sent = flipper_http_request(app->fhttp, POST, url, POST_HDRS, payload);
+    bool sent = flipper_http_request(app->fhttp, POST, url, app->post_headers, payload);
     if(!sent) return false;
 
     uint32_t t1 = 50;
@@ -605,7 +672,7 @@ static int32_t worker_thread(void* ctx) {
                    strstr(app->fhttp->last_response, "[CONNECTED]") != NULL;
 
     if(!wifi_ok) {
-        flipper_http_save_wifi(app->fhttp, "YOUR_SSID", "YOUR_PASSWORD");
+        flipper_http_save_wifi(app->fhttp, app->creds_ssid, app->creds_pass);
         furi_delay_ms(3000);
 
         furi_mutex_acquire(app->mx, FuriWaitForever);
@@ -700,6 +767,46 @@ static int32_t worker_thread(void* ctx) {
 
     FURI_LOG_I(TAG, "Worker stopped");
     return 0;
+}
+
+// ─── Setup callbacks (credential collection) ──────────────────────────────────
+
+static void setup_secret_done(void* ctx) {
+    TgApp* app = ctx;
+    app->in_setup = false;
+    creds_save(app);
+    creds_build_headers(app);
+    app->st = ST_DEBUG;
+    view_dispatcher_switch_to_view(app->vd, VIEW_MAIN);
+    app->wt = furi_thread_alloc_ex("TgWorker", 4 * 1024, worker_thread, app);
+    furi_thread_start(app->wt);
+}
+
+static void setup_pass_done(void* ctx) {
+    TgApp* app = ctx;
+    memset(app->creds_secret, 0, sizeof(app->creds_secret));
+    text_input_set_header_text(app->text_input, "Secret Key");
+    text_input_set_result_callback(app->text_input, setup_secret_done, app,
+                                   app->creds_secret, sizeof(app->creds_secret), false);
+    view_dispatcher_switch_to_view(app->vd, VIEW_TEXT_INPUT);
+}
+
+static void setup_ssid_done(void* ctx) {
+    TgApp* app = ctx;
+    memset(app->creds_pass, 0, sizeof(app->creds_pass));
+    text_input_set_header_text(app->text_input, "WiFi Password");
+    text_input_set_result_callback(app->text_input, setup_pass_done, app,
+                                   app->creds_pass, sizeof(app->creds_pass), false);
+    view_dispatcher_switch_to_view(app->vd, VIEW_TEXT_INPUT);
+}
+
+static void begin_setup(TgApp* app) {
+    app->in_setup = true;
+    memset(app->creds_ssid, 0, sizeof(app->creds_ssid));
+    text_input_set_header_text(app->text_input, "WiFi SSID");
+    text_input_set_result_callback(app->text_input, setup_ssid_done, app,
+                                   app->creds_ssid, sizeof(app->creds_ssid), false);
+    view_dispatcher_switch_to_view(app->vd, VIEW_TEXT_INPUT);
 }
 
 // ─── ViewDispatcher callbacks ─────────────────────────────────────────────────
@@ -921,6 +1028,9 @@ static bool input_cb(InputEvent* e, void* ctx) {
                 app->compose_buf[0] = '\0';
                 app->in_compose = true;
                 furi_mutex_release(app->mx);
+                text_input_set_header_text(app->text_input, "Message");
+                text_input_set_result_callback(app->text_input, text_input_result_cb, app,
+                                               app->compose_buf, COMPOSE_SZ, false);
                 view_dispatcher_switch_to_view(app->vd, VIEW_TEXT_INPUT);
                 return true;
             }
@@ -993,10 +1103,6 @@ int32_t telegram_reader_app(void* p) {
     view_dispatcher_add_view(app->vd, VIEW_MAIN, app->main_view);
 
     app->text_input = text_input_alloc();
-    text_input_set_header_text(app->text_input, "Message");
-    text_input_set_result_callback(
-        app->text_input, text_input_result_cb, app,
-        app->compose_buf, COMPOSE_SZ, false);
     view_dispatcher_add_view(app->vd, VIEW_TEXT_INPUT, text_input_get_view(app->text_input));
 
     view_dispatcher_switch_to_view(app->vd, VIEW_MAIN);
@@ -1009,9 +1115,12 @@ int32_t telegram_reader_app(void* p) {
         app->dbg.done = true;
         furi_mutex_release(app->mx);
         redraw_main(app);
-    } else {
+    } else if(creds_load(app)) {
+        creds_build_headers(app);
         app->wt = furi_thread_alloc_ex("TgWorker", 4 * 1024, worker_thread, app);
         furi_thread_start(app->wt);
+    } else {
+        begin_setup(app);
     }
 
     view_dispatcher_run(app->vd);

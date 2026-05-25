@@ -53,11 +53,6 @@
       {% endif %}
     </div>
 
-    <form class="compose-bar" onsubmit="sendMsg(event)">
-      <input class="compose-input" id="compose-input" type="text"
-             placeholder="Write a message…" autocomplete="off" maxlength="4096">
-      <button class="send-btn" type="submit">Send</button>
-    </form>
   </footer>
 </div>
 
@@ -75,46 +70,6 @@
     } else {
       alert('Failed to delete.');
     }
-  }
-
-  async function sendMsg(e) {
-    e.preventDefault();
-    const input = document.getElementById('compose-input');
-    const text = input.value.trim();
-    if (!text) return;
-    const btn = e.target.querySelector('button');
-    btn.disabled = true;
-    try {
-      const res = await fetch(`/flipper/send/{{ chat.id }}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
-      });
-      const data = await res.json();
-      if (data.ok) {
-        input.value = '';
-        const msgs = document.getElementById('messages');
-        const el = document.createElement('div');
-        el.className = 'message-group self';
-        el.innerHTML = `
-          <div class="msg-header">
-            <span class="msg-from" style="color:#5288c1">Me</span>
-            <span class="msg-time">${new Date().toISOString().slice(11,16)}</span>
-          </div>
-          <div class="msg-bubble">${escHtml(text)}</div>`;
-        msgs.appendChild(el);
-        msgs.scrollTop = msgs.scrollHeight;
-      } else {
-        alert('Send failed: ' + (data.error || 'unknown error'));
-      }
-    } finally {
-      btn.disabled = false;
-      input.focus();
-    }
-  }
-
-  function escHtml(s) {
-    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
 </script>
 {% endblock %}

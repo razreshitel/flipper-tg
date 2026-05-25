@@ -6,7 +6,6 @@
     <div class="topbar-logo">🐬</div>
     <span class="topbar-title">Flipper Telegram</span>
     <span class="badge">{{ chats | length }}</span>
-    <button class="new-chat-btn" onclick="openNewChat()" title="Start new chat">+</button>
   </header>
 
   <main class="chat-list">
@@ -44,67 +43,4 @@
   </footer>
 </div>
 
-<!-- New chat modal -->
-<div class="modal-backdrop" id="modal" onclick="closeNewChat(event)">
-  <div class="modal">
-    <h2 class="modal-title">New Chat</h2>
-    <p class="modal-sub">Enter a public Telegram username. The bot must be able to reach them.</p>
-    <form onsubmit="startNewChat(event)">
-      <div class="modal-input-row">
-        <span class="at-prefix">@</span>
-        <input class="modal-input" id="username-input" type="text"
-               placeholder="username" autocomplete="off" spellcheck="false">
-      </div>
-      <div id="modal-error" class="modal-error"></div>
-      <div class="modal-actions">
-        <button type="button" class="modal-cancel" onclick="closeNewChat()">Cancel</button>
-        <button type="submit" class="modal-submit" id="modal-submit-btn">Start Chat</button>
-      </div>
-    </form>
-  </div>
-</div>
-
-<script>
-  function openNewChat() {
-    document.getElementById('modal').classList.add('open');
-    document.getElementById('username-input').focus();
-    document.getElementById('modal-error').textContent = '';
-  }
-
-  function closeNewChat(e) {
-    if (e && e.target !== document.getElementById('modal')) return;
-    document.getElementById('modal').classList.remove('open');
-  }
-
-  document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') document.getElementById('modal').classList.remove('open');
-  });
-
-  async function startNewChat(e) {
-    e.preventDefault();
-    const username = document.getElementById('username-input').value.trim().replace(/^@/, '');
-    if (!username) return;
-    const errEl = document.getElementById('modal-error');
-    const btn = document.getElementById('modal-submit-btn');
-    btn.disabled = true;
-    errEl.textContent = '';
-    try {
-      const res = await fetch('/api/chats/new', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        window.location.href = `/chat/${data.id}`;
-      } else {
-        errEl.textContent = data.detail || 'Could not resolve username.';
-      }
-    } catch {
-      errEl.textContent = 'Network error.';
-    } finally {
-      btn.disabled = false;
-    }
-  }
-</script>
 {% endblock %}

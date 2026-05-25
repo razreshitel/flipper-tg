@@ -104,8 +104,10 @@ typedef struct {
     char creds_ssid[CRED_SZ];
     char creds_pass[CRED_SZ];
     char creds_secret[CRED_SZ];
-    char creds_host[CRED_SZ];   /* e.g. 1.2.3.4:8888 */
-    char api_base[80];          /* https://<creds_host> */
+    char creds_ip[CRED_SZ];  /* e.g. 192.168.1.100 */
+    char creds_port[8];      /* e.g. 8888 */
+    char creds_host[72];     /* computed: ip:port, max 71 chars */
+    char api_base[80];        /* https://<creds_host> */
     char get_headers[160];
     char post_headers[220];
     bool in_setup;
@@ -114,6 +116,9 @@ typedef struct {
 // ─── Credentials file ────────────────────────────────────────────────────────
 
 static void creds_apply(TgApp* app) {
+    if(app->creds_ip[0] && app->creds_port[0])
+        snprintf(app->creds_host, sizeof(app->creds_host),
+                 "%s:%s", app->creds_ip, app->creds_port);
     snprintf(app->api_base, sizeof(app->api_base), "https://%s", app->creds_host);
     snprintf(app->get_headers, sizeof(app->get_headers),
              "{\"X-Secret\":\"%s\"}", app->creds_secret);
@@ -127,7 +132,7 @@ static bool creds_load(TgApp* app) {
     bool     ok = false;
 
     if(storage_file_open(f, CREDS_PATH, FSAM_READ, FSOM_OPEN_EXISTING)) {
-        char buf[300] = {0};
+        char buf[350] = {0};
         storage_file_read(f, buf, sizeof(buf) - 1);
         storage_file_close(f);
 
@@ -136,18 +141,29 @@ static bool creds_load(TgApp* app) {
         #define PARSE_FIELD(key, dst) \
             p = strstr(buf, key "="); \
             if(p) { \
-                snprintf(dst, sizeof(dst), "%.63s", p + strlen(key) + 1); \
+                snprintf(dst, sizeof(dst), "%s", p + strlen(key) + 1); \
                 nl = strchr(dst, '\n'); if(nl) *nl = '\0'; \
                 nl = strchr(dst, '\r'); if(nl) *nl = '\0'; \
             }
         PARSE_FIELD("ssid",   app->creds_ssid)
         PARSE_FIELD("pass",   app->creds_pass)
         PARSE_FIELD("secret", app->creds_secret)
-        PARSE_FIELD("host",   app->creds_host)
+        PARSE_FIELD("ip",     app->creds_ip)
+        PARSE_FIELD("port",   app->creds_port)
+        if(!app->creds_ip[0] || !app->creds_port[0]) {
+            char legacy_host[CRED_SZ] = {0};
+            PARSE_FIELD("host", legacy_host)
+            char* col = strchr(legacy_host, ':');
+            if(col) {
+                *col = '\0';
+                snprintf(app->creds_ip, CRED_SZ, "%s", legacy_host);
+                snprintf(app->creds_port, sizeof(app->creds_port), "%s", col + 1);
+            }
+        }
         #undef PARSE_FIELD
 
         ok = app->creds_ssid[0] && app->creds_pass[0] &&
-             app->creds_secret[0] && app->creds_host[0];
+             app->creds_secret[0] && app->creds_ip[0] && app->creds_port[0];
     }
 
     storage_file_free(f);
@@ -161,10 +177,10 @@ static void creds_save(TgApp* app) {
     File* f = storage_file_alloc(st);
 
     if(storage_file_open(f, CREDS_PATH, FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
-        char buf[300];
-        int  len = snprintf(buf, sizeof(buf), "ssid=%s\npass=%s\nsecret=%s\nhost=%s\n",
+        char buf[350];
+        int  len = snprintf(buf, sizeof(buf), "ssid=%s\npass=%s\nsecret=%s\nip=%s\nport=%s\n",
                             app->creds_ssid, app->creds_pass,
-                            app->creds_secret, app->creds_host);
+                            app->creds_secret, app->creds_ip, app->creds_port);
         storage_file_write(f, buf, (uint16_t)len);
         storage_file_close(f);
     }
@@ -663,7 +679,8 @@ static int32_t worker_thread(void* ctx) {
     }
 
     app->fhttp->state = IDLE;
-    furi_delay_ms(300);
+    { uint32_t f = furi_event_flag_wait(app->ev, EV_STOP, FuriFlagWaitAny|FuriFlagNoClear, 300);
+      if(f & EV_STOP) return 0; }
 
     furi_mutex_acquire(app->mx, FuriWaitForever);
     app->dbg.wifi = -1;
@@ -671,14 +688,16 @@ static int32_t worker_thread(void* ctx) {
     view_dispatcher_send_custom_event(app->vd, CUSTOM_EV_REDRAW);
 
     flipper_http_send_command(app->fhttp, HTTP_CMD_STATUS);
-    furi_delay_ms(2000);
+    { uint32_t f = furi_event_flag_wait(app->ev, EV_STOP, FuriFlagWaitAny|FuriFlagNoClear, 2000);
+      if(f & EV_STOP) return 0; }
 
     bool wifi_ok = app->fhttp->last_response &&
                    strstr(app->fhttp->last_response, "[CONNECTED]") != NULL;
 
     if(!wifi_ok) {
         flipper_http_save_wifi(app->fhttp, app->creds_ssid, app->creds_pass);
-        furi_delay_ms(3000);
+        { uint32_t f = furi_event_flag_wait(app->ev, EV_STOP, FuriFlagWaitAny|FuriFlagNoClear, 3000);
+          if(f & EV_STOP) return 0; }
 
         furi_mutex_acquire(app->mx, FuriWaitForever);
         app->dbg.wifi = 2;
@@ -687,7 +706,9 @@ static int32_t worker_thread(void* ctx) {
 
         flipper_http_send_command(app->fhttp, HTTP_CMD_WIFI_CONNECT);
         for(int wi = 0; wi < 60 && !wifi_ok; wi++) {
-            furi_delay_ms(500);
+            uint32_t f = furi_event_flag_wait(app->ev, EV_STOP,
+                             FuriFlagWaitAny|FuriFlagNoClear, 500);
+            if(f & EV_STOP) return 0;
             const char* lr = app->fhttp->last_response;
             if(lr)
                 wifi_ok = strstr(lr, "[CONNECTED]") != NULL ||
@@ -715,7 +736,8 @@ static int32_t worker_thread(void* ctx) {
         return 0;
     }
 
-    furi_delay_ms(2000);
+    { uint32_t f = furi_event_flag_wait(app->ev, EV_STOP, FuriFlagWaitAny|FuriFlagNoClear, 2000);
+      if(f & EV_STOP) return 0; }
 
     furi_mutex_acquire(app->mx, FuriWaitForever);
     app->wcmd = CMD_CHATS;
@@ -776,7 +798,7 @@ static int32_t worker_thread(void* ctx) {
 
 // ─── Setup callbacks (credential collection) ──────────────────────────────────
 
-static void setup_host_done(void* ctx) {
+static void setup_port_done(void* ctx) {
     TgApp* app = ctx;
     app->in_setup = false;
     creds_save(app);
@@ -787,12 +809,21 @@ static void setup_host_done(void* ctx) {
     furi_thread_start(app->wt);
 }
 
+static void setup_ip_done(void* ctx) {
+    TgApp* app = ctx;
+    memset(app->creds_port, 0, sizeof(app->creds_port));
+    text_input_set_header_text(app->text_input, "Server Port");
+    text_input_set_result_callback(app->text_input, setup_port_done, app,
+                                   app->creds_port, sizeof(app->creds_port), false);
+    view_dispatcher_switch_to_view(app->vd, VIEW_TEXT_INPUT);
+}
+
 static void setup_secret_done(void* ctx) {
     TgApp* app = ctx;
-    memset(app->creds_host, 0, sizeof(app->creds_host));
-    text_input_set_header_text(app->text_input, "Server IP:port");
-    text_input_set_result_callback(app->text_input, setup_host_done, app,
-                                   app->creds_host, sizeof(app->creds_host), false);
+    memset(app->creds_ip, 0, sizeof(app->creds_ip));
+    text_input_set_header_text(app->text_input, "Server IP");
+    text_input_set_result_callback(app->text_input, setup_ip_done, app,
+                                   app->creds_ip, sizeof(app->creds_ip), false);
     view_dispatcher_switch_to_view(app->vd, VIEW_TEXT_INPUT);
 }
 

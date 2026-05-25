@@ -120,18 +120,25 @@ _CYR_MAP = {
 
 def _asc(s: str, maxlen: int) -> str:
     out = []
-    prev_bracket = False
+    skip_next = False
     for ch in (s or ""):
         cp = ord(ch)
         if 32 <= cp < 127:
             out.append(ch)
-            prev_bracket = False
+            skip_next = False
         elif ch in _CYR_MAP:
             out.append(_CYR_MAP[ch])
-            prev_bracket = False
-        elif cp > 127 and not prev_bracket:
-            out.append("[]")
-            prev_bracket = True
+            skip_next = False
+        elif cp == 0x200D:  # ZWJ — next codepoint completes the same emoji
+            skip_next = True
+        elif 0xFE00 <= cp <= 0xFE0F:  # variation selectors
+            pass
+        elif 0x1F3FB <= cp <= 0x1F3FF:  # skin-tone modifiers
+            pass
+        elif cp > 127:
+            if not skip_next:
+                out.append("[]")
+            skip_next = False
     clean = "".join(out).strip()
     return (clean or "?")[:maxlen]
 

@@ -679,8 +679,8 @@ static int32_t worker_thread(void* ctx) {
     }
 
     app->fhttp->state = IDLE;
-    { uint32_t f = furi_event_flag_wait(app->ev, EV_STOP, FuriFlagWaitAny|FuriFlagNoClear, 300);
-      if(f & EV_STOP) return 0; }
+    furi_delay_ms(300);
+    if(furi_event_flag_get(app->ev) & EV_STOP) return 0;
 
     furi_mutex_acquire(app->mx, FuriWaitForever);
     app->dbg.wifi = -1;
@@ -688,16 +688,16 @@ static int32_t worker_thread(void* ctx) {
     view_dispatcher_send_custom_event(app->vd, CUSTOM_EV_REDRAW);
 
     flipper_http_send_command(app->fhttp, HTTP_CMD_STATUS);
-    { uint32_t f = furi_event_flag_wait(app->ev, EV_STOP, FuriFlagWaitAny|FuriFlagNoClear, 2000);
-      if(f & EV_STOP) return 0; }
+    furi_delay_ms(2000);
+    if(furi_event_flag_get(app->ev) & EV_STOP) return 0;
 
     bool wifi_ok = app->fhttp->last_response &&
                    strstr(app->fhttp->last_response, "[CONNECTED]") != NULL;
 
     if(!wifi_ok) {
         flipper_http_save_wifi(app->fhttp, app->creds_ssid, app->creds_pass);
-        { uint32_t f = furi_event_flag_wait(app->ev, EV_STOP, FuriFlagWaitAny|FuriFlagNoClear, 3000);
-          if(f & EV_STOP) return 0; }
+        furi_delay_ms(3000);
+        if(furi_event_flag_get(app->ev) & EV_STOP) return 0;
 
         furi_mutex_acquire(app->mx, FuriWaitForever);
         app->dbg.wifi = 2;
@@ -706,9 +706,8 @@ static int32_t worker_thread(void* ctx) {
 
         flipper_http_send_command(app->fhttp, HTTP_CMD_WIFI_CONNECT);
         for(int wi = 0; wi < 60 && !wifi_ok; wi++) {
-            uint32_t f = furi_event_flag_wait(app->ev, EV_STOP,
-                             FuriFlagWaitAny|FuriFlagNoClear, 500);
-            if(f & EV_STOP) return 0;
+            furi_delay_ms(500);
+            if(furi_event_flag_get(app->ev) & EV_STOP) return 0;
             const char* lr = app->fhttp->last_response;
             if(lr)
                 wifi_ok = strstr(lr, "[CONNECTED]") != NULL ||
@@ -736,8 +735,8 @@ static int32_t worker_thread(void* ctx) {
         return 0;
     }
 
-    { uint32_t f = furi_event_flag_wait(app->ev, EV_STOP, FuriFlagWaitAny|FuriFlagNoClear, 2000);
-      if(f & EV_STOP) return 0; }
+    furi_delay_ms(2000);
+    if(furi_event_flag_get(app->ev) & EV_STOP) return 0;
 
     furi_mutex_acquire(app->mx, FuriWaitForever);
     app->wcmd = CMD_CHATS;

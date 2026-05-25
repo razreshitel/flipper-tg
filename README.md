@@ -110,7 +110,7 @@ chmod 640 key.pem
 
 ### 5. Install the systemd service
 
-Create `/etc/systemd/system/flipper-telegram.service`:
+Create `/etc/systemd/system/flipper-tg.service`:
 
 ```ini
 [Unit]
@@ -132,8 +132,8 @@ WantedBy=multi-user.target
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now flipper-telegram
-sudo systemctl status flipper-telegram
+sudo systemctl enable --now flipper-tg
+sudo systemctl status flipper-tg
 ```
 
 ---
@@ -212,14 +212,14 @@ Open `https://<pi-ip>:8888` and accept the self-signed cert warning.
 |---|---|---|
 | "No WiFi board response" | FlipperHTTP board not connected | Check UART wiring; reflash board firmware |
 | WiFi step hangs | Wrong SSID/password | Edit `flipper_http_save_wifi()`, rebuild FAP |
-| HTTP timeout on Flipper | Pi IP changed or server stopped | Update `API_BASE`, check `systemctl status flipper-telegram` |
+| HTTP timeout on Flipper | Pi IP changed or server stopped | Update `API_BASE`, check `systemctl status flipper-tg` |
 | "Invalid HTTP request" in logs | Server not serving HTTPS | Ensure `cert.pem`/`key.pem` exist and are readable |
 | 0 chats on Flipper | No messages in database | Send a message to your bot on Telegram first |
 | New chat fails | User hasn't started the bot | Ask them to send `/start` to your bot |
 
 ```bash
 # Live server logs
-sudo journalctl -u flipper-telegram -f
+sudo journalctl -u flipper-tg -f
 ```
 
 ---

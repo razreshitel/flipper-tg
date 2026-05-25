@@ -13,7 +13,6 @@
 #include <stdio.h>
 
 #define TAG        "TgReader"
-#define API_BASE   "https://YOUR_SERVER_IP:8888"
 #define CREDS_PATH "/ext/apps_data/telegram_reader/creds.txt"
 #define COMPOSE_SZ 65
 #define CRED_SZ    64
@@ -83,7 +82,7 @@ typedef struct {
     bool   in_compose;
 
     WorkerCmd wcmd;
-    char      wurl[128];
+    char      wurl[200];
     char      wresp[RESP_SZ];
     bool      wok;
 
@@ -105,6 +104,8 @@ typedef struct {
     char creds_ssid[CRED_SZ];
     char creds_pass[CRED_SZ];
     char creds_secret[CRED_SZ];
+    char creds_host[CRED_SZ];   /* e.g. 1.2.3.4:8888 */
+    char api_base[80];          /* https://<creds_host> */
     char get_headers[160];
     char post_headers[220];
     bool in_setup;
@@ -112,7 +113,8 @@ typedef struct {
 
 // ─── Credentials file ────────────────────────────────────────────────────────
 
-static void creds_build_headers(TgApp* app) {
+static void creds_apply(TgApp* app) {
+    snprintf(app->api_base, sizeof(app->api_base), "https://%s", app->creds_host);
     snprintf(app->get_headers, sizeof(app->get_headers),
              "{\"X-Secret\":\"%s\"}", app->creds_secret);
     snprintf(app->post_headers, sizeof(app->post_headers),
@@ -125,7 +127,7 @@ static bool creds_load(TgApp* app) {
     bool     ok = false;
 
     if(storage_file_open(f, CREDS_PATH, FSAM_READ, FSOM_OPEN_EXISTING)) {
-        char buf[220] = {0};
+        char buf[300] = {0};
         storage_file_read(f, buf, sizeof(buf) - 1);
         storage_file_close(f);
 
@@ -141,9 +143,11 @@ static bool creds_load(TgApp* app) {
         PARSE_FIELD("ssid",   app->creds_ssid)
         PARSE_FIELD("pass",   app->creds_pass)
         PARSE_FIELD("secret", app->creds_secret)
+        PARSE_FIELD("host",   app->creds_host)
         #undef PARSE_FIELD
 
-        ok = app->creds_ssid[0] && app->creds_pass[0] && app->creds_secret[0];
+        ok = app->creds_ssid[0] && app->creds_pass[0] &&
+             app->creds_secret[0] && app->creds_host[0];
     }
 
     storage_file_free(f);
@@ -157,9 +161,10 @@ static void creds_save(TgApp* app) {
     File* f = storage_file_alloc(st);
 
     if(storage_file_open(f, CREDS_PATH, FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
-        char buf[220];
-        int  len = snprintf(buf, sizeof(buf), "ssid=%s\npass=%s\nsecret=%s\n",
-                            app->creds_ssid, app->creds_pass, app->creds_secret);
+        char buf[300];
+        int  len = snprintf(buf, sizeof(buf), "ssid=%s\npass=%s\nsecret=%s\nhost=%s\n",
+                            app->creds_ssid, app->creds_pass,
+                            app->creds_secret, app->creds_host);
         storage_file_write(f, buf, (uint16_t)len);
         storage_file_close(f);
     }
@@ -511,7 +516,7 @@ static const char* state_name(HTTPState s) {
 
 static bool do_http_get(TgApp* app) {
     furi_mutex_acquire(app->mx, FuriWaitForever);
-    char url[128];
+    char url[200];
     snprintf(url, sizeof(url), "%s", app->wurl);
     app->dbg.http = -1;
     app->dbg.resp = -1;
@@ -592,7 +597,7 @@ static bool do_http_get(TgApp* app) {
 
 static bool do_http_post(TgApp* app) {
     furi_mutex_acquire(app->mx, FuriWaitForever);
-    char url[128];
+    char url[200];
     char payload[90];
     snprintf(url, sizeof(url), "%s", app->wurl);
     snprintf(payload, sizeof(payload), "%s", app->send_payload);
@@ -714,7 +719,7 @@ static int32_t worker_thread(void* ctx) {
 
     furi_mutex_acquire(app->mx, FuriWaitForever);
     app->wcmd = CMD_CHATS;
-    snprintf(app->wurl, sizeof(app->wurl), "%s/flipper/chats", API_BASE);
+    snprintf(app->wurl, sizeof(app->wurl), "%s/flipper/chats", app->api_base);
     furi_mutex_release(app->mx);
 
     app->wok = false;
@@ -771,15 +776,24 @@ static int32_t worker_thread(void* ctx) {
 
 // ─── Setup callbacks (credential collection) ──────────────────────────────────
 
-static void setup_secret_done(void* ctx) {
+static void setup_host_done(void* ctx) {
     TgApp* app = ctx;
     app->in_setup = false;
     creds_save(app);
-    creds_build_headers(app);
+    creds_apply(app);
     app->st = ST_DEBUG;
     view_dispatcher_switch_to_view(app->vd, VIEW_MAIN);
     app->wt = furi_thread_alloc_ex("TgWorker", 4 * 1024, worker_thread, app);
     furi_thread_start(app->wt);
+}
+
+static void setup_secret_done(void* ctx) {
+    TgApp* app = ctx;
+    memset(app->creds_host, 0, sizeof(app->creds_host));
+    text_input_set_header_text(app->text_input, "Server IP:port");
+    text_input_set_result_callback(app->text_input, setup_host_done, app,
+                                   app->creds_host, sizeof(app->creds_host), false);
+    view_dispatcher_switch_to_view(app->vd, VIEW_TEXT_INPUT);
 }
 
 static void setup_pass_done(void* ctx) {
@@ -878,7 +892,7 @@ static void text_input_result_cb(void* ctx) {
     }
 
     furi_mutex_acquire(app->mx, FuriWaitForever);
-    snprintf(app->wurl, sizeof(app->wurl), "%s/flipper/send/%s", API_BASE, app->ac_id);
+    snprintf(app->wurl, sizeof(app->wurl), "%s/flipper/send/%s", app->api_base, app->ac_id);
     snprintf(app->send_payload, sizeof(app->send_payload),
              "{\"text\":\"%s\"}", app->compose_buf);
     app->wcmd = CMD_SEND;
@@ -895,7 +909,7 @@ static bool input_cb(InputEvent* e, void* ctx) {
     if(e->type != InputTypeShort && e->type != InputTypeLong) return false;
 
     furi_mutex_acquire(app->mx, FuriWaitForever);
-    char url_buf[128];
+    char url_buf[200];
     bool consumed = true;
 
     switch(app->st) {
@@ -920,7 +934,7 @@ static bool input_cb(InputEvent* e, void* ctx) {
                 app->dbg.preview[0] = '\0';
                 app->dbg.state_s[0] = '\0';
                 app->wcmd = CMD_CHATS;
-                snprintf(app->wurl, sizeof(app->wurl), "%s/flipper/chats", API_BASE);
+                snprintf(app->wurl, sizeof(app->wurl), "%s/flipper/chats", app->api_base);
                 furi_event_flag_set(app->ev, EV_RUN);
             }
         } else {
@@ -950,7 +964,7 @@ static bool input_cb(InputEvent* e, void* ctx) {
                 snprintf(app->ac_name, sizeof(app->ac_name), "%s", app->ch[app->ch_sel].name);
                 app->msg_char_off = 0;
                 snprintf(url_buf, sizeof(url_buf),
-                         "%s/flipper/messages/%s?page=0", API_BASE, app->ac_id);
+                         "%s/flipper/messages/%s?page=0", app->api_base, app->ac_id);
                 snprintf(app->wurl, sizeof(app->wurl), "%s", url_buf);
                 app->wcmd = CMD_MSGS;
                 app->st = ST_LOADING;
@@ -975,7 +989,7 @@ static bool input_cb(InputEvent* e, void* ctx) {
             } else if(app->mg_page > 0) {
                 snprintf(url_buf, sizeof(url_buf),
                          "%s/flipper/messages/%s?page=%d",
-                         API_BASE, app->ac_id, app->mg_page - 1);
+                         app->api_base, app->ac_id, app->mg_page - 1);
                 snprintf(app->wurl, sizeof(app->wurl), "%s", url_buf);
                 app->wcmd = CMD_MSGS;
                 app->st = ST_LOADING;
@@ -989,7 +1003,7 @@ static bool input_cb(InputEvent* e, void* ctx) {
             } else if(app->mg_page < app->mg_pages - 1) {
                 snprintf(url_buf, sizeof(url_buf),
                          "%s/flipper/messages/%s?page=%d",
-                         API_BASE, app->ac_id, app->mg_page + 1);
+                         app->api_base, app->ac_id, app->mg_page + 1);
                 snprintf(app->wurl, sizeof(app->wurl), "%s", url_buf);
                 app->wcmd = CMD_MSGS;
                 app->st = ST_LOADING;
@@ -1037,7 +1051,7 @@ static bool input_cb(InputEvent* e, void* ctx) {
             consumed = false;
             break;
         case InputKeyBack:
-            snprintf(url_buf, sizeof(url_buf), "%s/flipper/chats", API_BASE);
+            snprintf(url_buf, sizeof(url_buf), "%s/flipper/chats", app->api_base);
             snprintf(app->wurl, sizeof(app->wurl), "%s", url_buf);
             app->wcmd = CMD_CHATS;
             app->st = ST_LOADING;
@@ -1116,7 +1130,7 @@ int32_t telegram_reader_app(void* p) {
         furi_mutex_release(app->mx);
         redraw_main(app);
     } else if(creds_load(app)) {
-        creds_build_headers(app);
+        creds_apply(app);
         app->wt = furi_thread_alloc_ex("TgWorker", 4 * 1024, worker_thread, app);
         furi_thread_start(app->wt);
     } else {

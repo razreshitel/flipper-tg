@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block title %}{{ chat.name }} — Flipper Telegram{% endblock %}
+{% block body %}
+<div class="page chat-page">
+  <header class="topbar">
+    <a class="back-btn" href="/">←</a>
+    <div class="avatar sm" style="background:{{ chat.name | coloridx }}">
+      {{ chat.name[0].upper() if chat.name else '?' }}
+    </div>
+    <div class="topbar-info">
+      <span class="topbar-title">{{ chat.name }}</span>
+      <span class="topbar-sub">{{ chat.message_count }} messages · {{ chat.type }}</span>
+    </div>
+    <a class="api-link dim" href="/flipper/messages/{{ chat.id }}" title="Flipper endpoint">🐬</a>
+  </header>
+
+  <main class="messages" id="messages">
+    {% if not messages %}
+    <div class="empty-state">No messages on this page.</div>
+    {% endif %}
+
+    {% for msg in messages %}
+    <div class="message-group {% if msg.from_name == 'Me' %}self{% endif %}" id="msg-{{ msg.id }}">
+      <div class="msg-header">
+        <span class="msg-from" style="color:{{ msg.from_name | coloridx if msg.from_name else '#7d8e9e' }}">
+          {{ msg.from_name or 'Unknown' }}
+        </span>
+        <span class="msg-time">{{ msg.date | fmtdate }}</span>
+        {% if msg.message_type != 'text' %}
+        <span class="msg-type-tag">{{ msg.message_type }}</span>
+        {% endif %}
+        <button class="delete-btn" onclick="deleteMsg({{ msg.id }})" title="Delete">✕</button>
+      </div>
+      <div class="msg-bubble {% if msg.message_type != 'text' %}msg-media{% endif %}">
+        {{ msg.text or '' }}
+      </div>
+    </div>
+    {% endfor %}
+  </main>
+
+  <footer class="chat-footer">
+    <div class="pagination">
+      {% if has_prev %}
+      <a class="page-btn" href="/chat/{{ chat.id }}?page={{ page - 1 }}">← Newer</a>
+      {% else %}
+      <span class="page-btn disabled">← Newer</span>
+      {% endif %}
+      <span class="page-info">{{ page + 1 }} / {{ total_pages }}</span>
+      {% if has_next %}
+      <a class="page-btn" href="/chat/{{ chat.id }}?page={{ page + 1 }}">Older →</a>
+      {% else %}
+      <span class="page-btn disabled">Older →</span>
+      {% endif %}
+    </div>
+
+    <form class="compose-bar" onsubmit="sendMsg(event)">
+      <input class="compose-input" id="compose-input" type="text"
+             placeholder="Write a message…" autocomplete="off" maxlength="4096">
+      <button class="send-btn" type="submit">Send</button>
+    </form>
+  </footer>
+</div>
+
+<script>
+  window.addEventListener('load', () => {
+    const m = document.getElementById('messages');
+    m.scrollTop = m.scrollHeight;
+  });
+
+  async function deleteMsg(id) {
+    if (!confirm('Delete this message?')) return;
+    const res = await fetch(`/api/messages/${id}`, { method: 'DELETE' });
+    if (res.ok) {
+      document.getElementById(`msg-${id}`).remove();
+    } else {
+      alert('Failed to delete.');
+    }
+  }
+
+  async function sendMsg(e) {
+    e.preventDefault();
+    const input = document.getElementById('compose-input');
+    const text = input.value.trim();
+    if (!text) return;
+    const btn = e.target.querySelector('button');
+    btn.disabled = true;
+    try {
+      const res = await fetch(`/flipper/send/{{ chat.id }}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        input.value = '';
+        const msgs = document.getElementById('messages');
+        const el = document.createElement('div');
+        el.className = 'message-group self';
+        el.innerHTML = `
+          <div class="msg-header">
+            <span class="msg-from" style="color:#5288c1">Me</span>
+            <span class="msg-time">${new Date().toISOString().slice(11,16)}</span>
+          </div>
+          <div class="msg-bubble">${escHtml(text)}</div>`;
+        msgs.appendChild(el);
+        msgs.scrollTop = msgs.scrollHeight;
+      } else {
+        alert('Send failed: ' + (data.error || 'unknown error'));
+      }
+    } finally {
+      btn.disabled = false;
+      input.focus();
+    }
+  }
+
+  function escHtml(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+</script>
+{% endblock %}

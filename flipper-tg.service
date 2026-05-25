@@ -1,0 +1,17 @@
+[Unit]
+Description=Flipper Telegram server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/flipper-tg
+ExecStart=/home/pi/flipper-tg/venv/bin/python main.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

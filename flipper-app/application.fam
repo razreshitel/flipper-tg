@@ -1,0 +1,12 @@
+App(
+    appid="telegram_reader",
+    name="Telegram Reader",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="telegram_reader_app",
+    requires=["gui"],
+    stack_size=4 * 1024,
+    fap_category="Tools",
+    fap_version=(0, 1),
+    fap_description="Browse Telegram messages from FlipperApp bot",
+    sources=["telegram_reader.c", "flipper_http/flipper_http.c"],
+)

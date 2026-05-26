@@ -57,7 +57,7 @@ def require_web_auth(credentials: HTTPBasicCredentials = Depends(basic_auth)):
     if not ok:
         raise HTTPException(
             status_code=401,
-            headers={"WWW-Authenticate": 'Basic realm="Flipper Telegram"'},
+            headers={"WWW-Authenticate": 'Basic realm="Enter your secret as password — username can be anything"'},
             detail="Unauthorized",
         )
 

@@ -411,10 +411,13 @@ static void render_chats(Canvas* c, TgApp* app) {
 
     if(app->ch_cnt == 0) {
         canvas_set_font(c, FontSecondary);
-        canvas_draw_str_aligned(c, SW/2, 30, AlignCenter, AlignTop, "No chats yet");
-        canvas_draw_str_aligned(c, SW/2, 42, AlignCenter, AlignTop, "@FlipperApp_bot");
+        canvas_draw_str_aligned(c, SW/2, 28, AlignCenter, AlignTop, "No chats yet");
+        canvas_draw_str_aligned(c, SW/2, 40, AlignCenter, AlignTop, "@FlipperApp_bot");
+        canvas_draw_str_aligned(c, SW/2, SH - 1, AlignCenter, AlignBottom, "Hold OK = open by ID");
         return;
     }
+
+    canvas_draw_str_aligned(c, SW/2, SH - 1, AlignCenter, AlignBottom, "hld:new");
 
     canvas_set_font(c, FontSecondary);
     for(int i = 0; i < VR && (app->ch_top + i) < app->ch_cnt; i++) {
@@ -811,6 +814,28 @@ static int32_t worker_thread(void* ctx) {
     return 0;
 }
 
+// ─── New-chat callback ────────────────────────────────────────────────────────
+
+static void newchat_done(void* ctx) {
+    TgApp* app = ctx;
+    app->in_compose = false;
+    if(app->ac_id[0] == '\0') {
+        view_dispatcher_switch_to_view(app->vd, VIEW_MAIN);
+        return;
+    }
+    furi_mutex_acquire(app->mx, FuriWaitForever);
+    strncpy(app->ac_name, app->ac_id, sizeof(app->ac_name) - 1);
+    app->ac_name[sizeof(app->ac_name) - 1] = '\0';
+    app->msg_char_off = 0;
+    snprintf(app->wurl, sizeof(app->wurl),
+             "%s/flipper/messages/%s?page=0", app->api_base, app->ac_id);
+    app->wcmd = CMD_MSGS;
+    app->st = ST_LOADING;
+    furi_event_flag_set(app->ev, EV_RUN);
+    furi_mutex_release(app->mx);
+    view_dispatcher_switch_to_view(app->vd, VIEW_MAIN);
+}
+
 // ─── Setup callbacks (credential collection) ──────────────────────────────────
 
 static void setup_port_done(void* ctx) {
@@ -1006,6 +1031,17 @@ static bool input_cb(InputEvent* e, void* ctx) {
             }
             break;
         case InputKeyOk:
+            if(e->type == InputTypeLong) {
+                memset(app->ac_id, 0, sizeof(app->ac_id));
+                app->in_compose = true;
+                furi_mutex_release(app->mx);
+                text_input_set_header_text(app->text_input, "Telegram Chat ID");
+                text_input_set_result_callback(app->text_input, newchat_done, app,
+                                               app->ac_id, sizeof(app->ac_id), false);
+                view_dispatcher_switch_to_view(app->vd, VIEW_TEXT_INPUT);
+                return true;
+            }
+            /* fall through */
         case InputKeyRight:
             if(app->ch_cnt > 0) {
                 snprintf(app->ac_id,   sizeof(app->ac_id),   "%s", app->ch[app->ch_sel].id);

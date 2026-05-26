@@ -4,6 +4,7 @@
 
 #include "flipper_http/flipper_http.h"
 #include <furi.h>
+#include <furi_hal_random.h>
 #include <gui/gui.h>
 #include <gui/view_dispatcher.h>
 #include <gui/modules/text_input.h>
@@ -111,6 +112,10 @@ typedef struct {
     char get_headers[160];
     char post_headers[220];
     bool in_setup;
+
+    uint8_t crypto_key[32];    /* SHA256(creds_secret) */
+    char    secret_hash[65];   /* hex of crypto_key, sent as X-Secret */
+    char    enc_payload_buf[401]; /* XOR+hex encoded POST body */
 } TgApp;
 
 // ─── Utilities ───────────────────────────────────────────────────────────────
@@ -127,6 +132,106 @@ static void json_escape(const char* src, char* dst, size_t dsz) {
     dst[j] = '\0';
 }
 
+// ─── SHA-256 + XOR crypto ─────────────────────────────────────────────────────
+
+static const uint32_t _SHA_K[64] = {
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2,
+};
+
+static void _sha_block(uint32_t h[8], const uint8_t blk[64]) {
+    uint32_t w[64];
+    for(int i = 0; i < 16; i++)
+        w[i] = ((uint32_t)blk[i*4]<<24)|((uint32_t)blk[i*4+1]<<16)|
+               ((uint32_t)blk[i*4+2]<<8)|(uint32_t)blk[i*4+3];
+    for(int i = 16; i < 64; i++) {
+        uint32_t s0=(w[i-15]>>7|w[i-15]<<25)^(w[i-15]>>18|w[i-15]<<14)^(w[i-15]>>3);
+        uint32_t s1=(w[i-2]>>17|w[i-2]<<15)^(w[i-2]>>19|w[i-2]<<13)^(w[i-2]>>10);
+        w[i]=w[i-16]+s0+w[i-7]+s1;
+    }
+    uint32_t a=h[0],b=h[1],c=h[2],d=h[3],e=h[4],f=h[5],g=h[6],hv=h[7];
+    for(int i = 0; i < 64; i++) {
+        uint32_t S1=(e>>6|e<<26)^(e>>11|e<<21)^(e>>25|e<<7);
+        uint32_t ch=(e&f)^(~e&g);
+        uint32_t t1=hv+S1+ch+_SHA_K[i]+w[i];
+        uint32_t S0=(a>>2|a<<30)^(a>>13|a<<19)^(a>>22|a<<10);
+        uint32_t maj=(a&b)^(a&c)^(b&c);
+        uint32_t t2=S0+maj;
+        hv=g;g=f;f=e;e=d+t1;d=c;c=b;b=a;a=t1+t2;
+    }
+    h[0]+=a;h[1]+=b;h[2]+=c;h[3]+=d;h[4]+=e;h[5]+=f;h[6]+=g;h[7]+=hv;
+}
+
+static void sha256(const uint8_t* data, size_t len, uint8_t out[32]) {
+    uint32_t h[8]={0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,
+                   0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
+    uint8_t blk[64];
+    size_t off=0;
+    while(off+64<=len){_sha_block(h,data+off);off+=64;}
+    size_t rem=len-off;
+    memcpy(blk,data+off,rem);
+    blk[rem]=0x80;
+    if(rem<56){
+        memset(blk+rem+1,0,55-rem);
+        uint64_t bits=(uint64_t)len*8;
+        for(int i=0;i<8;i++) blk[56+i]=(uint8_t)(bits>>(56-i*8));
+        _sha_block(h,blk);
+    } else {
+        memset(blk+rem+1,0,63-rem);
+        _sha_block(h,blk);
+        memset(blk,0,56);
+        uint64_t bits=(uint64_t)len*8;
+        for(int i=0;i<8;i++) blk[56+i]=(uint8_t)(bits>>(56-i*8));
+        _sha_block(h,blk);
+    }
+    for(int i=0;i<8;i++){
+        out[i*4]=(uint8_t)(h[i]>>24); out[i*4+1]=(uint8_t)(h[i]>>16);
+        out[i*4+2]=(uint8_t)(h[i]>>8); out[i*4+3]=(uint8_t)h[i];
+    }
+}
+
+static void xor_encode_hex(const uint8_t* key, const char* plain, char* out, size_t outsz) {
+    static const char HX[] = "0123456789abcdef";
+    size_t n=strlen(plain), i;
+    for(i=0; i<n && (i*2+2)<outsz; i++){
+        uint8_t b=(uint8_t)plain[i]^key[i&31];
+        out[i*2]=HX[b>>4]; out[i*2+1]=HX[b&15];
+    }
+    out[i*2<outsz ? i*2 : outsz-1]='\0';
+}
+
+static void xor_decode_hex(const uint8_t* key, char* buf) {
+    size_t n=strlen(buf)/2;
+    for(size_t i=0; i<n; i++){
+        uint8_t hi=(uint8_t)buf[i*2], lo=(uint8_t)buf[i*2+1];
+        hi=hi>='a'?hi-'a'+10:hi>='A'?hi-'A'+10:hi-'0';
+        lo=lo>='a'?lo-'a'+10:lo>='A'?lo-'A'+10:lo-'0';
+        buf[i]=(char)(((hi<<4)|lo)^key[i&31]);
+    }
+    buf[n]='\0';
+}
+
+/* Generate an 8-byte random nonce, hex-encode it, then derive a
+   per-request 32-byte key as SHA256(base_key || nonce). */
+static void derive_req_key(const uint8_t base_key[32],
+                           uint8_t req_key[32], char nonce_hex[17]) {
+    uint8_t nonce[8];
+    furi_hal_random_fill_buf(nonce, sizeof(nonce));
+    for(int i = 0; i < 8; i++)
+        snprintf(nonce_hex + i*2, 3, "%02x", nonce[i]);
+    nonce_hex[16] = '\0';
+    uint8_t kn[40];
+    memcpy(kn, base_key, 32);
+    memcpy(kn + 32, nonce, 8);
+    sha256(kn, 40, req_key);
+}
+
 // ─── Credentials file ────────────────────────────────────────────────────────
 
 static void creds_apply(TgApp* app) {
@@ -134,12 +239,13 @@ static void creds_apply(TgApp* app) {
         snprintf(app->creds_host, sizeof(app->creds_host),
                  "%s:%s", app->creds_ip, app->creds_port);
     snprintf(app->api_base, sizeof(app->api_base), "https://%s", app->creds_host);
-    char esc_secret[CRED_SZ * 2];
-    json_escape(app->creds_secret, esc_secret, sizeof(esc_secret));
-    snprintf(app->get_headers, sizeof(app->get_headers),
-             "{\"X-Secret\":\"%s\"}", esc_secret);
-    snprintf(app->post_headers, sizeof(app->post_headers),
-             "{\"Content-Type\":\"application/json\",\"X-Secret\":\"%s\"}", esc_secret);
+
+    sha256((const uint8_t*)app->creds_secret, strlen(app->creds_secret), app->crypto_key);
+    for(int i = 0; i < 32; i++)
+        snprintf(app->secret_hash + i*2, 3, "%02x", app->crypto_key[i]);
+    app->secret_hash[64] = '\0';
+    /* get_headers / post_headers are no longer used; headers are built
+       per-request inside do_http_get / do_http_post with a fresh nonce. */
 }
 
 static bool creds_load(TgApp* app) {
@@ -555,7 +661,14 @@ static bool do_http_get(TgApp* app) {
     furi_mutex_release(app->mx);
     view_dispatcher_send_custom_event(app->vd, CUSTOM_EV_REDRAW);
 
-    bool sent = flipper_http_request(app->fhttp, GET, url, app->get_headers, NULL);
+    uint8_t req_key[32];
+    char nonce_hex[17];
+    derive_req_key(app->crypto_key, req_key, nonce_hex);
+    char req_headers[180];
+    snprintf(req_headers, sizeof(req_headers),
+             "{\"X-Secret\":\"%s\",\"X-Nonce\":\"%s\"}", app->secret_hash, nonce_hex);
+
+    bool sent = flipper_http_request(app->fhttp, GET, url, req_headers, NULL);
     FURI_LOG_I(TAG, "HTTP GET %s → sent=%d", url, (int)sent);
 
     furi_mutex_acquire(app->mx, FuriWaitForever);
@@ -621,6 +734,7 @@ static bool do_http_get(TgApp* app) {
     furi_mutex_acquire(app->mx, FuriWaitForever);
     snprintf(app->wresp, RESP_SZ - 1, "%s", app->fhttp->last_response);
     app->wresp[RESP_SZ - 1] = '\0';
+    xor_decode_hex(req_key, app->wresp);
     app->dbg.resp = 1;
     furi_mutex_release(app->mx);
 
@@ -635,7 +749,16 @@ static bool do_http_post(TgApp* app) {
     snprintf(payload, sizeof(payload), "%s", app->send_payload);
     furi_mutex_release(app->mx);
 
-    bool sent = flipper_http_request(app->fhttp, POST, url, app->post_headers, payload);
+    uint8_t req_key[32];
+    char nonce_hex[17];
+    derive_req_key(app->crypto_key, req_key, nonce_hex);
+    char req_headers[240];
+    snprintf(req_headers, sizeof(req_headers),
+             "{\"Content-Type\":\"text/plain\",\"X-Secret\":\"%s\",\"X-Nonce\":\"%s\"}",
+             app->secret_hash, nonce_hex);
+
+    xor_encode_hex(req_key, payload, app->enc_payload_buf, sizeof(app->enc_payload_buf));
+    bool sent = flipper_http_request(app->fhttp, POST, url, req_headers, app->enc_payload_buf);
     if(!sent) return false;
 
     uint32_t t1 = 50;
@@ -659,6 +782,7 @@ static bool do_http_post(TgApp* app) {
     if((fs == IDLE || fast_done) && app->fhttp->last_response) {
         furi_mutex_acquire(app->mx, FuriWaitForever);
         snprintf(app->wresp, RESP_SZ - 1, "%s", app->fhttp->last_response);
+        xor_decode_hex(req_key, app->wresp);
         furi_mutex_release(app->mx);
         return true;
     }

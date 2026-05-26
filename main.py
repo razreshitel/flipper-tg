@@ -1,13 +1,17 @@
 import asyncio
+import hashlib
+import json
 import math
 import os
 import secrets as secrets_mod
+import time
+from collections import deque
 from pathlib import Path
 
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -24,6 +28,8 @@ BASE_DIR = Path(__file__).parent
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8888"))
 FLIPPER_SECRET = os.getenv("FLIPPER_SECRET", "")
+_FLIPPER_KEY   = hashlib.sha256(FLIPPER_SECRET.encode()).digest() if FLIPPER_SECRET else b""
+_FLIPPER_HASH  = hashlib.sha256(FLIPPER_SECRET.encode()).hexdigest() if FLIPPER_SECRET else ""
 
 app = FastAPI(title="Flipper Telegram")
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
@@ -50,11 +56,46 @@ templates.env.filters["fmtdate"] = fmtdate
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
 
-def require_web_auth(credentials: HTTPBasicCredentials = Depends(basic_auth)):
+FAIL_WINDOW_SEC = 60
+FAIL_MAX = 3
+_fail_log: dict[str, deque] = {}
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "?"
+
+
+def _check_rate_limit(ip: str):
+    now = time.time()
+    log = _fail_log.get(ip)
+    if not log:
+        return
+    while log and now - log[0] > FAIL_WINDOW_SEC:
+        log.popleft()
+    if not log:
+        _fail_log.pop(ip, None)
+        return
+    if len(log) >= FAIL_MAX:
+        retry = int(FAIL_WINDOW_SEC - (now - log[0])) + 1
+        raise HTTPException(
+            status_code=429,
+            headers={"Retry-After": str(retry)},
+            detail="Too many failed attempts",
+        )
+
+
+def _record_failure(ip: str):
+    _fail_log.setdefault(ip, deque()).append(time.time())
+
+
+def require_web_auth(request: Request, credentials: HTTPBasicCredentials = Depends(basic_auth)):
+    ip = _client_ip(request)
+    _check_rate_limit(ip)
     ok = secrets_mod.compare_digest(
         credentials.password.encode(), FLIPPER_SECRET.encode()
     )
     if not ok:
+        _record_failure(ip)
         raise HTTPException(
             status_code=401,
             headers={"WWW-Authenticate": 'Basic realm="Flipper Telegram"'},
@@ -63,7 +104,10 @@ def require_web_auth(credentials: HTTPBasicCredentials = Depends(basic_auth)):
 
 
 async def require_secret(request: Request):
-    if request.headers.get("X-Secret") != FLIPPER_SECRET:
+    ip = _client_ip(request)
+    _check_rate_limit(ip)
+    if request.headers.get("X-Secret") != _FLIPPER_HASH:
+        _record_failure(ip)
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
@@ -117,6 +161,33 @@ async def api_delete_message(message_id: int):
     return {"ok": True}
 
 
+# ── Flipper crypto ────────────────────────────────────────────────────────────
+
+def _req_key(request: Request) -> bytes:
+    nonce_hex = request.headers.get("X-Nonce", "")
+    if nonce_hex:
+        try:
+            return hashlib.sha256(_FLIPPER_KEY + bytes.fromhex(nonce_hex)).digest()
+        except ValueError:
+            pass
+    return _FLIPPER_KEY
+
+def _xor_crypt(data: bytes, key: bytes) -> bytes:
+    return bytes(b ^ key[i & 31] for i, b in enumerate(data))
+
+def _xor_encrypt(data: bytes, key: bytes) -> str:
+    return _xor_crypt(data, key).hex()
+
+def _xor_decrypt(hex_str: str, key: bytes) -> bytes:
+    return _xor_crypt(bytes.fromhex(hex_str.strip()), key)
+
+def _flipper_resp(data, key: bytes) -> Response:
+    return Response(
+        content=_xor_encrypt(json.dumps(data, separators=(",", ":")).encode(), key),
+        media_type="text/plain",
+    )
+
+
 # ── Flipper API ───────────────────────────────────────────────────────────────
 
 _CYR_MAP = {
@@ -159,29 +230,31 @@ def _asc(s: str, maxlen: int) -> str:
 
 
 @app.get("/flipper/ping", dependencies=[Depends(require_secret)])
-async def flipper_ping():
-    return {"ok": 1}
+async def flipper_ping(request: Request):
+    return _flipper_resp({"ok": 1}, _req_key(request))
 
 
 @app.get("/flipper/chats", dependencies=[Depends(require_secret)])
-async def flipper_chats():
+async def flipper_chats(request: Request):
+    key = _req_key(request)
     chats = await get_chats(limit=20)
-    return {
+    return _flipper_resp({
         "items": [
             {"id": c["id"], "name": _asc(c["name"], 18), "n": c["message_count"]}
             for c in chats
         ]
-    }
+    }, key)
 
 
 @app.get("/flipper/messages/{chat_id}", dependencies=[Depends(require_secret)])
-async def flipper_messages(chat_id: int, page: int = 0):
+async def flipper_messages(request: Request, chat_id: int, page: int = 0):
+    key = _req_key(request)
     per_page = 5
     count = await get_message_count(chat_id)
     total_pages = max(1, math.ceil(count / per_page))
     page = max(0, min(page, total_pages - 1))
     msgs = await get_messages(chat_id, page=page, per_page=per_page, newest_first=True)
-    return {
+    return _flipper_resp({
         "page": page,
         "pages": total_pages,
         "msgs": [
@@ -192,7 +265,7 @@ async def flipper_messages(chat_id: int, page: int = 0):
             }
             for m in msgs
         ],
-    }
+    }, key)
 
 
 _bot_app = None
@@ -200,18 +273,22 @@ _bot_app = None
 
 @app.post("/flipper/send/{chat_id}", dependencies=[Depends(require_secret)])
 async def flipper_send(chat_id: int, request: Request):
-    body = await request.json()
+    key = _req_key(request)
+    try:
+        body = json.loads(_xor_decrypt((await request.body()).decode(), key))
+    except Exception:
+        return _flipper_resp({"ok": 0, "error": "decrypt"}, key)
     text = (body.get("text") or "").strip()
     if not text:
-        return JSONResponse({"ok": 0, "error": "empty"})
+        return _flipper_resp({"ok": 0, "error": "empty"}, key)
     if _bot_app is None:
-        return JSONResponse({"ok": 0, "error": "bot not ready"})
+        return _flipper_resp({"ok": 0, "error": "bot not ready"}, key)
     try:
         msg = await _bot_app.bot.send_message(chat_id=chat_id, text=text)
         await save_sent_message(chat_id, text, telegram_id=msg.message_id)
     except Exception as e:
-        return JSONResponse({"ok": 0, "error": str(e)[:50]})
-    return {"ok": 1}
+        return _flipper_resp({"ok": 0, "error": str(e)[:50]}, key)
+    return _flipper_resp({"ok": 1}, key)
 
 
 # ── Runner ────────────────────────────────────────────────────────────────────

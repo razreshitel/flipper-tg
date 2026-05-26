@@ -1,12 +1,14 @@
 import asyncio
 import math
 import os
+import secrets as secrets_mod
 from pathlib import Path
 
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -26,6 +28,7 @@ FLIPPER_SECRET = os.getenv("FLIPPER_SECRET", "")
 app = FastAPI(title="Flipper Telegram")
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
+basic_auth = HTTPBasic()
 
 AVATAR_COLORS = [
     "#e17055", "#6c5ce7", "#00b894", "#0984e3", "#fdcb6e",
@@ -45,22 +48,34 @@ templates.env.filters["coloridx"] = coloridx
 templates.env.filters["fmtdate"] = fmtdate
 
 
-# ── Flipper secret auth ───────────────────────────────────────────────────────
+# ── Auth ─────────────────────────────────────────────────────────────────────
+
+def require_web_auth(credentials: HTTPBasicCredentials = Depends(basic_auth)):
+    ok = secrets_mod.compare_digest(
+        credentials.password.encode(), FLIPPER_SECRET.encode()
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="Flipper Telegram"'},
+            detail="Unauthorized",
+        )
+
 
 async def require_secret(request: Request):
-    if FLIPPER_SECRET and request.headers.get("X-Secret") != FLIPPER_SECRET:
+    if request.headers.get("X-Secret") != FLIPPER_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 # ── Web UI ────────────────────────────────────────────────────────────────────
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/", response_class=HTMLResponse, dependencies=[Depends(require_web_auth)])
 async def index(request: Request):
     chats = await get_chats()
     return templates.TemplateResponse(request, "index.html", {"chats": chats})
 
 
-@app.get("/chat/{chat_id}", response_class=HTMLResponse)
+@app.get("/chat/{chat_id}", response_class=HTMLResponse, dependencies=[Depends(require_web_auth)])
 async def chat_view(request: Request, chat_id: int, page: int = 0):
     chat = await get_chat(chat_id)
     if not chat:
@@ -81,12 +96,12 @@ async def chat_view(request: Request, chat_id: int, page: int = 0):
 
 # ── JSON API ──────────────────────────────────────────────────────────────────
 
-@app.get("/api/chats")
+@app.get("/api/chats", dependencies=[Depends(require_web_auth)])
 async def api_chats():
     return await get_chats()
 
 
-@app.get("/api/chats/{chat_id}/messages")
+@app.get("/api/chats/{chat_id}/messages", dependencies=[Depends(require_web_auth)])
 async def api_messages(chat_id: int, page: int = 0, per_page: int = 20):
     msgs = await get_messages(chat_id, page=page, per_page=per_page)
     count = await get_message_count(chat_id)
@@ -94,7 +109,7 @@ async def api_messages(chat_id: int, page: int = 0, per_page: int = 20):
             "pages": math.ceil(count / per_page)}
 
 
-@app.delete("/api/messages/{message_id}")
+@app.delete("/api/messages/{message_id}", dependencies=[Depends(require_web_auth)])
 async def api_delete_message(message_id: int):
     deleted = await delete_message(message_id)
     if not deleted:
@@ -211,9 +226,13 @@ async def run_bot():
 
 
 async def main():
+    if not FLIPPER_SECRET:
+        raise SystemExit("FLIPPER_SECRET is not set — configure it in .env before starting")
     await init_db()
     ssl_key = BASE_DIR / "key.pem"
     ssl_cert = BASE_DIR / "cert.pem"
+    if not ssl_key.exists() or not ssl_cert.exists():
+        print("WARNING: cert.pem / key.pem not found — running over plain HTTP (run gen_cert.sh)")
     config = uvicorn.Config(
         app,
         host=HOST,

@@ -98,7 +98,7 @@ typedef struct {
     char ac_name[NAME_SZ];
 
     char compose_buf[COMPOSE_SZ];
-    char send_payload[90];
+    char send_payload[200];
     int  msg_char_off;
 
     char creds_ssid[CRED_SZ];
@@ -113,6 +113,20 @@ typedef struct {
     bool in_setup;
 } TgApp;
 
+// ─── Utilities ───────────────────────────────────────────────────────────────
+
+static void json_escape(const char* src, char* dst, size_t dsz) {
+    size_t j = 0;
+    for(size_t i = 0; src[i] && j + 2 < dsz; i++) {
+        if(src[i] == '"' || src[i] == '\\') {
+            if(j + 3 >= dsz) break;
+            dst[j++] = '\\';
+        }
+        dst[j++] = src[i];
+    }
+    dst[j] = '\0';
+}
+
 // ─── Credentials file ────────────────────────────────────────────────────────
 
 static void creds_apply(TgApp* app) {
@@ -120,10 +134,12 @@ static void creds_apply(TgApp* app) {
         snprintf(app->creds_host, sizeof(app->creds_host),
                  "%s:%s", app->creds_ip, app->creds_port);
     snprintf(app->api_base, sizeof(app->api_base), "https://%s", app->creds_host);
+    char esc_secret[CRED_SZ * 2];
+    json_escape(app->creds_secret, esc_secret, sizeof(esc_secret));
     snprintf(app->get_headers, sizeof(app->get_headers),
-             "{\"X-Secret\":\"%s\"}", app->creds_secret);
+             "{\"X-Secret\":\"%s\"}", esc_secret);
     snprintf(app->post_headers, sizeof(app->post_headers),
-             "{\"Content-Type\":\"application/json\",\"X-Secret\":\"%s\"}", app->creds_secret);
+             "{\"Content-Type\":\"application/json\",\"X-Secret\":\"%s\"}", esc_secret);
 }
 
 static bool creds_load(TgApp* app) {
@@ -614,7 +630,7 @@ static bool do_http_get(TgApp* app) {
 static bool do_http_post(TgApp* app) {
     furi_mutex_acquire(app->mx, FuriWaitForever);
     char url[200];
-    char payload[90];
+    char payload[200];
     snprintf(url, sizeof(url), "%s", app->wurl);
     snprintf(payload, sizeof(payload), "%s", app->send_payload);
     furi_mutex_release(app->mx);
@@ -923,8 +939,10 @@ static void text_input_result_cb(void* ctx) {
 
     furi_mutex_acquire(app->mx, FuriWaitForever);
     snprintf(app->wurl, sizeof(app->wurl), "%s/flipper/send/%s", app->api_base, app->ac_id);
+    char esc_text[COMPOSE_SZ * 2];
+    json_escape(app->compose_buf, esc_text, sizeof(esc_text));
     snprintf(app->send_payload, sizeof(app->send_payload),
-             "{\"text\":\"%s\"}", app->compose_buf);
+             "{\"text\":\"%s\"}", esc_text);
     app->wcmd = CMD_SEND;
     app->st = ST_LOADING;
     furi_mutex_release(app->mx);

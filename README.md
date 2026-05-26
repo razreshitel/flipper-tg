@@ -20,8 +20,8 @@ A Telegram bot collects incoming messages into a local SQLite database. A FastAP
 
 - Browse Telegram chats and messages on the Flipper Zero 128×64 display
 - Send messages from the Flipper using the built-in on-screen keyboard
-- Web UI at `https://<pi-ip>:8888` — browse, send, and delete messages from a browser
-- Start a new chat by entering any public Telegram @username
+- Web UI at `https://<pi-ip>:8888` — browse and delete messages from a browser
+- Credentials (WiFi, server, secret) entered on first run — no hardcoded values
 - Cyrillic → Latin transliteration for the Flipper display
 - Paginated message list (5 per page on device, 30 in browser)
 
@@ -86,6 +86,7 @@ nano .env   # fill in your values
 | Variable | Required | Description |
 |---|---|---|
 | `BOT_TOKEN` | Yes | Telegram API token from BotFather |
+| `FLIPPER_SECRET` | Yes | Shared secret — enter the same value on the Flipper during first-run setup |
 | `SOCKS_PROXY` | No | SOCKS5 proxy, e.g. `socks5://127.0.0.1:1080`. Leave empty if unused. |
 | `HOST` | No | Bind address (default `0.0.0.0`) |
 | `PORT` | No | Port (default `8888`) |
@@ -102,7 +103,7 @@ venv/bin/pip install -r requirements.txt
 Run once — valid for 10 years.
 
 ```bash
-# Edit gen_cert.sh first: replace 192.168.0.102 with your Pi's actual IP
+# Edit gen_cert.sh first: replace <pi-ip> with your Pi's actual IP
 bash gen_cert.sh
 sudo chown $USER:$USER cert.pem key.pem
 chmod 640 key.pem
@@ -149,20 +150,6 @@ ufbt update   # downloads the SDK matching your Flipper firmware
 
 Place the [FlipperHTTP](https://github.com/jblanked/FlipperHTTP) C library at `telegram-flipper-app/flipper_http/`.
 
-### Configure before building
-
-Edit `telegram-flipper-app/telegram_reader.c`:
-
-```c
-#define API_BASE  "https://192.168.0.102:8888"   // ← your Pi's IP
-```
-
-Find `flipper_http_save_wifi` in `worker_thread()` and set your WiFi credentials:
-
-```c
-flipper_http_save_wifi(app->fhttp, "YourSSID", "YourPassword");
-```
-
 ### Build and deploy
 
 ```bash
@@ -189,7 +176,7 @@ Copy it to the Flipper's SD card at `/ext/apps/Tools/telegram_reader.fap` using 
 2. Debug screen shows connection progress (PING / WiFi / HTTP / Resp / Chts).
 3. Press **OK** when loaded to open the chat list.
 4. **Up/Down** to navigate, **OK** to open a chat.
-5. In a chat: **Up/Down** scrolls messages, **Left/Right** changes pages.
+5. In a chat: **Up/Down** scrolls messages (newest first), **Left/Right** scrolls long message text.
 6. **Hold OK** opens the on-screen keyboard to write and send a message.
 7. **Back** returns to the previous screen.
 
@@ -199,8 +186,6 @@ Open `https://<pi-ip>:8888` and accept the self-signed cert warning.
 
 - Click a chat to view its messages.
 - **Hover** over a message to reveal the **✕** delete button.
-- Use the **compose bar** at the bottom to send a message from the browser.
-- Press **+** in the top bar to start a new chat by @username.
 
 > The bot can only message users who have previously started a conversation with it (Telegram restriction). For groups, the bot must be a member.
 
@@ -211,8 +196,8 @@ Open `https://<pi-ip>:8888` and accept the self-signed cert warning.
 | Symptom | Cause | Fix |
 |---|---|---|
 | "No WiFi board response" | FlipperHTTP board not connected | Check UART wiring; reflash board firmware |
-| WiFi step hangs | Wrong SSID/password | Edit `flipper_http_save_wifi()`, rebuild FAP |
-| HTTP timeout on Flipper | Pi IP changed or server stopped | Update `API_BASE`, check `systemctl status flipper-tg` |
+| WiFi step hangs | Wrong SSID/password | Delete `creds.txt` from `/ext/apps_data/telegram_reader/` and re-enter |
+| HTTP timeout on Flipper | Pi IP changed or server stopped | Delete `creds.txt` and re-enter credentials; check `systemctl status flipper-tg` |
 | "Invalid HTTP request" in logs | Server not serving HTTPS | Ensure `cert.pem`/`key.pem` exist and are readable |
 | 0 chats on Flipper | No messages in database | Send a message to your bot on Telegram first |
 | New chat fails | User hasn't started the bot | Ask them to send `/start` to your bot |
